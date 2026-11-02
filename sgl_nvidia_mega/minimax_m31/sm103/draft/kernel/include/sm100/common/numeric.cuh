@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #pragma once
 
 // BF16 / UE8M0 / E4M3 conversions and the mma.sync fragments of the GEMM and attention OPs.

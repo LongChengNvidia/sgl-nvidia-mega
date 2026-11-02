@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #pragma once
 
 // Shared by the four GEMM OPs: the MXFP8 mainloop, the reduction readout, the activation loaders

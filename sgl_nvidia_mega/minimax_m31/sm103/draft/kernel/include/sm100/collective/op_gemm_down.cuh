@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #pragma once
 
 // OP gemm_down: down: [7, 3072] x [6144, 3072]^T, pushes this rank's TP4 partial (bf16 pairs) to

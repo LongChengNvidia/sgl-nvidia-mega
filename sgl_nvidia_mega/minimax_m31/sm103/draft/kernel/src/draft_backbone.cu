@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // MiniMax-M3.1 DSpark draft backbone, TP4, one request's seven-row block: the
 // five dense decoder layers and the final norm in one cooperative launch.
 //

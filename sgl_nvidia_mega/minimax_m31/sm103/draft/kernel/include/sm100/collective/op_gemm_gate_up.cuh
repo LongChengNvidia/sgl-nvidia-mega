@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #pragma once
 
 // OP gemm_gate_up: gate_up: [7, 6144] x [6144, 6144]^T (gate rows 0-3071 | up rows 3072-6143),
