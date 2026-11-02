@@ -3,8 +3,8 @@
  * All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-// Producer/consumer page ring with kRingSlots slots (generalizes the 4-slot msa_v2
-// m3_ring.cuh). Item i uses slot i % N with phase (i / N) & 1. One producer thread fills
+// Producer/consumer page ring with kRingSlots slots. Item i uses slot i % N with phase
+// (i / N) & 1. One producer thread fills
 // each item (full[s] count 1 plus transaction bytes); every consumer warp releases it once
 // (empty[s] count kConsumerWarps). Items that are never released ("terminal") must form a
 // suffix of the per-CTA item sequence, at most kRingSlots long.

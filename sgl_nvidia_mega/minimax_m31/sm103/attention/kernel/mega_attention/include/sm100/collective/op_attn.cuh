@@ -7,8 +7,7 @@
 // S^T = QMUL4(K) . Q^T, P = exp2(s c - m c + log2 448) -> E4M3, l = sum of FP32 P,
 // O = P . QMUL4(V), and publishes the unnormalized BF16(O * scale_v) with (m, l) as tagged
 // records. COMBINE CTA (row, s) then merges head s of the row over the 16 splits in slot order
-// and writes the MXFP8 output (MegaAttention numerics: sm100_m3_decode_attention_softmax.hpp,
-// sm100_m3_decode_attention_output_epilogue.hpp).
+// and writes the MXFP8 output with the MegaAttention softmax and output-epilogue numerics.
 #pragma once
 
 #include "op_score.cuh"

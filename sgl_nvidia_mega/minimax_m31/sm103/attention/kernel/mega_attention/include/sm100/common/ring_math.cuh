@@ -3,10 +3,8 @@
  * All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
-// Tensor-core fragments and exact conversions. The MMA helpers follow the msa_v2
-// high_tps m3_mma.cuh; the NVFP4/MXFP8 conversions reproduce the msa_v1 MegaAttention
-// contract (sm100_m3_decode_attention_projection_numeric.hpp, ..._indexer_config.hpp,
-// ..._attention_output_epilogue.hpp).
+// Tensor-core fragments and exact conversions: the MMA helpers, and the NVFP4/MXFP8
+// conversions of the MegaAttention numerics (projection, indexer and output epilogue).
 #pragma once
 
 #include <cuda_fp16.h>

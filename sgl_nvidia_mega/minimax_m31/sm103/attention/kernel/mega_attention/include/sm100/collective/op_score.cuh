@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 // SCORE + TOPK. A page's score for row r is the maximum over its causally visible tokens of
-// qi[r] . QMUL4(ki): the MegaAttention indexer formula (sm100_m3_decode_indexer_score_pipeline.hpp)
-// with FP32 accumulation of the 128-dim dot product in two chains. TOPK selects the exact FP32
-// top-15 historical pages plus the local page (sm100_m3_decode_topk_runtime.hpp key order).
+// qi[r] . QMUL4(ki): the MegaAttention indexer formula, with FP32 accumulation of the 128-dim
+// dot product in two chains. TOPK selects the exact FP32 top-15 historical pages plus the local
+// page (sm100_m3_decode_topk_runtime.hpp key order).
 #pragma once
 
 #include "../common/ring_math.cuh"
