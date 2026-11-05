@@ -15,13 +15,18 @@ from unittest.mock import Mock, patch
 import torch
 
 try:
-    from sglang.kernels.plugin_kernels.nvidia import spec as registry
-    from sglang.kernels.plugin_kernels.nvidia.spec import (
-        MEGAKERNEL_API_VERSION,
-        BuildContext,
-        Feature,
-        NumericsKind,
-    )
+    import sglang.kernels.plugin_kernels.nvidia.spec as registry
+except ModuleNotFoundError as error:
+    if error.name not in (
+        "sglang.kernels",
+        "sglang.kernels.plugin_kernels",
+        "sglang.kernels.plugin_kernels.nvidia",
+        "sglang.kernels.plugin_kernels.nvidia.spec",
+    ):
+        raise
+    import sglang.srt.megakernels.spec as registry
+
+try:
     from sglang.srt.kernel_plugins.nvidia.binding import (
         HybridPoolView,
         HybridStepView,
@@ -32,8 +37,13 @@ try:
         MlaStepView,
         PreparationView,
     )
-except ModuleNotFoundError:  # SGLang before sgl-project/sglang#45389
-    from sglang.srt.megakernels import spec as registry
+except ModuleNotFoundError as error:
+    if error.name not in (
+        "sglang.srt.kernel_plugins",
+        "sglang.srt.kernel_plugins.nvidia",
+        "sglang.srt.kernel_plugins.nvidia.binding",
+    ):
+        raise
     from sglang.srt.megakernels.binding import (
         HybridPoolView,
         HybridStepView,
@@ -44,18 +54,18 @@ except ModuleNotFoundError:  # SGLang before sgl-project/sglang#45389
         MlaStepView,
         PreparationView,
     )
-    from sglang.srt.megakernels.spec import (
-        MEGAKERNEL_API_VERSION,
-        BuildContext,
-        Feature,
-        NumericsKind,
-    )
+
+BuildContext = registry.BuildContext
+Feature = registry.Feature
+NumericsKind = registry.NumericsKind
+MEGAKERNEL_API_VERSION = registry.MEGAKERNEL_API_VERSION
 
 WIDTHS = (1, 2, 3, 4, 5, 6, 7, 8, 16, 32, 64)
-# Frozen payload shipped in a0a97a0 (#17); host integration changes must not
-# alter these 43 kernel files.
+# Includes KDA/AttnRes, embedding-shard and private DCP wait-deadline adaptations.
+# Private DCP resource checkpoint adds host handle ownership and finite prewarm
+# dispatch only; existing kernel/JIT/compiler/numerical method ASTs are unchanged.
 FROZEN_PAYLOAD_SHA256 = (
-    "317036ce5d069f1eb68ac110032d7a7f310ad78e2565fd605ed04e968c2aa82a"
+    "24b161022f6e92d7644501e9a9fe81ea98cbfaca2663d035524c2083cf4fbd0a"
 )
 
 
@@ -65,6 +75,9 @@ class _Mode:
 
     def is_decode(self) -> bool:
         return self.name == "decode"
+
+    def is_target_verify(self) -> bool:
+        return self.name == "target_verify"
 
 
 def _batch(mode: str, batch_size: int):
@@ -93,7 +106,10 @@ class TestKimiK3Contract(unittest.TestCase):
         self.assertEqual(SPEC.requires.resident_blocks, 152)
         self.assertEqual(SPEC.requires.dtypes, frozenset({"bfloat16"}))
         self.assertEqual(SPEC.requires.decode_graph_backends, frozenset({"full"}))
-        self.assertEqual(SPEC.features, frozenset({Feature.MULTI_NODE_TP}))
+        self.assertEqual(
+            SPEC.features,
+            frozenset({Feature.MULTI_NODE_TP, Feature.SPECULATIVE_DECODING}),
+        )
         self.assertEqual(SPEC.max_rows, 64)
         self.assertIsNotNone(SPEC.prepare)
         self.assertEqual(
@@ -121,36 +137,74 @@ class TestKimiK3Contract(unittest.TestCase):
         )
 
     def test_registration_is_lazy_and_api_mismatch_fails_closed(self):
-        for name in tuple(sys.modules):
-            if name.startswith("sgl_nvidia_mega.kimi_k3"):
-                del sys.modules[name]
-        plugin = importlib.import_module("sgl_nvidia_mega.plugin")
-        plugin.register()
-        self.assertEqual(
-            registry._REGISTRY["KimiK3ForConditionalGeneration"],
-            "sgl_nvidia_mega.kimi_k3.spec:SPEC",
-        )
-        self.assertFalse(
-            any(name.startswith("sgl_nvidia_mega.kimi_k3") for name in sys.modules)
-        )
-        spec, reason = registry.find_spec(
-            architectures=["KimiK3ForConditionalGeneration"], isa="sm_103"
-        )
-        self.assertIsNotNone(spec)
-        self.assertEqual(reason, "")
-        self.assertFalse(
-            any(
-                name.startswith("sgl_nvidia_mega.kimi_k3.cutedsl")
-                for name in sys.modules
+        # Preserve modules already held by other collected contract tests.
+        parent = importlib.import_module("sgl_nvidia_mega")
+        child = importlib.import_module("sgl_nvidia_mega.kimi_k3")
+        prefetch = importlib.import_module("sgl_nvidia_mega.kimi_k3.weight_prefetch")
+        with (
+            patch.dict(sys.modules),
+            patch.dict(vars(importlib.import_module("sgl_nvidia_mega"))),
+        ):
+            for name in tuple(sys.modules):
+                if name.startswith("sgl_nvidia_mega.kimi_k3"):
+                    del sys.modules[name]
+            plugin = importlib.import_module("sgl_nvidia_mega.plugin")
+            plugin.register()
+            self.assertEqual(
+                registry._REGISTRY["KimiK3ForConditionalGeneration"],
+                "sgl_nvidia_mega.kimi_k3.spec:SPEC",
             )
-        )
-        with patch.object(registry, "MEGAKERNEL_API_VERSION", 3):
-            incompatible, reason = registry.find_spec(
+            self.assertFalse(
+                any(name.startswith("sgl_nvidia_mega.kimi_k3") for name in sys.modules)
+            )
+            spec, reason = registry.find_spec(
                 architectures=["KimiK3ForConditionalGeneration"], isa="sm_103"
             )
-        self.assertIsNone(incompatible)
-        self.assertIn("uses megakernel API version 2", reason)
-        self.assertIn("requires version 3", reason)
+            self.assertIsNotNone(spec)
+            self.assertEqual(reason, "")
+            self.assertFalse(
+                any(
+                    name.startswith("sgl_nvidia_mega.kimi_k3.cutedsl")
+                    for name in sys.modules
+                )
+            )
+            for version in (1, 3):
+                with (
+                    self.subTest(version=version),
+                    patch.object(registry, "MEGAKERNEL_API_VERSION", version),
+                ):
+                    incompatible, reason = registry.find_spec(
+                        architectures=["KimiK3ForConditionalGeneration"], isa="sm_103"
+                    )
+                    self.assertIsNone(incompatible)
+                    self.assertIn("uses megakernel API version 2", reason)
+                    self.assertIn(f"requires version {version}", reason)
+
+        self.assertIs(parent.kimi_k3, child)
+        self.assertIs(importlib.import_module(child.__name__), child)
+        self.assertIs(importlib.import_module(prefetch.__name__), prefetch)
+
+    def test_api2_optional_entries_keep_stock_draft_and_graph_paths(self):
+        from sglang.srt.kernel_plugins.nvidia import binding
+
+        from sgl_nvidia_mega.kimi_k3.spec import _Built
+
+        built = object.__new__(_Built)
+        model = SimpleNamespace(
+            _megakernel=binding._InstalledMegakernel(
+                built=built, binding=None, prepare=None
+            )
+        )
+        self.assertEqual(binding._offered_entries(built), ())
+        self.assertEqual(binding._offered_graph_variants(built), {})
+        for name in registry.ENTRIES:
+            with self.subTest(entry=name):
+                self.assertIsNone(binding.megakernel_entry(model, name))
+        for runner in registry.GRAPH_VARIANT_RUNNERS:
+            with self.subTest(runner=runner):
+                self.assertIsNone(
+                    binding.megakernel_graph_variants(model, runner, batch_sizes=(1, 4))
+                )
 
     def test_build_filters_the_dense_capture_range_to_frozen_widths(self):
         from sgl_nvidia_mega.kimi_k3 import compat, providers
@@ -163,7 +217,7 @@ class TestKimiK3Contract(unittest.TestCase):
             deadline_s=30.0,
             binding=object(),
         )
-        resources = object()
+        resources = SimpleNamespace(tokens_per_request=1)
         with (
             patch.object(
                 compat,
@@ -191,6 +245,8 @@ class TestKimiK3Contract(unittest.TestCase):
             context_length=8192,
             memory_before={},
             deadline_ns=30_000_000_000,
+            tokens_per_request=1,
+            widths=WIDTHS,
         )
 
     def test_exact_widths_plan_and_every_other_call_falls_back(self):
@@ -198,6 +254,7 @@ class TestKimiK3Contract(unittest.TestCase):
 
         built = object.__new__(_Built)
         built.widths = WIDTHS
+        built.tokens_per_request = 1
         for width in WIDTHS:
             step = built.plan(SimpleNamespace(shape=(width,)), _batch("decode", width))
             self.assertEqual((step.mode, step.rows), ("decode", width))
@@ -231,13 +288,15 @@ class TestKimiK3Contract(unittest.TestCase):
         cfg = SimpleNamespace(
             cuda_graph_config=SimpleNamespace(decode=SimpleNamespace(backend="full")),
             context_length=8192,
+            speculative_algorithm=None,
         )
-        self.assertEqual(_config_disable_reasons(cfg, SimpleNamespace()), [])
-        cfg.context_length = 4096
+        hf_config = SimpleNamespace(max_position_embeddings=1048576)
+        self.assertEqual(_config_disable_reasons(cfg, hf_config), [])
+        cfg.context_length = 262145
         cfg.cuda_graph_config.decode.backend = "disabled"
-        reasons = _config_disable_reasons(cfg, SimpleNamespace())
+        reasons = _config_disable_reasons(cfg, hf_config)
         self.assertTrue(any("FULL" in reason for reason in reasons))
-        self.assertTrue(any("8192" in reason for reason in reasons))
+        self.assertTrue(any("1..262144" in reason for reason in reasons))
 
         class PackedMXFP4Method:
             pass
@@ -363,7 +422,6 @@ class TestKimiK3TypedBinding(unittest.TestCase):
         resources, hybrid, live, mla, conv, temporal, mla_core, kda_core = (
             self._fixture()
         )
-
         from sgl_nvidia_mega.kimi_k3.spec import SPEC, _Built
 
         built = object.__new__(_Built)
@@ -393,7 +451,6 @@ class TestKimiK3TypedBinding(unittest.TestCase):
 
     def test_typed_pool_replacement_is_refused(self):
         resources, hybrid, _, _, _, _, _, _ = self._fixture()
-
         from sgl_nvidia_mega.kimi_k3.spec import SPEC, _Built
 
         built = object.__new__(_Built)
@@ -482,6 +539,9 @@ class TestKimiK3TypedStep(unittest.TestCase):
             )
         resources = SimpleNamespace(
             binding_fingerprint="bound",
+            tokens_per_request=1,
+            widths=(batch,),
+            aux_capture_layers=None,
             model=SimpleNamespace(model=SimpleNamespace(embed_tokens=Mock())),
             layers=layers,
             attention=attention,
