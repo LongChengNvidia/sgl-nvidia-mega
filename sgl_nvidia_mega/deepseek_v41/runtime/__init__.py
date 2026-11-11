@@ -109,7 +109,11 @@ DRAFT_SLOTS = frozenset(
 # one cluster launch, sm103/attention/reindex_select.py;
 # target_lm_head_mxfp8 / draft_lm_head_mxfp8: the target's / the draft's LM head at 1-8
 # rows on an MXFP8 copy of the shard, a numerics change; the draft's is measurement only,
-# plan.MEASUREMENT_ONLY_SLOTS)
+# plan.MEASUREMENT_ONLY_SLOTS;
+# shared_fold: slot shared_ll's gate_up epilogue writes the clamped SwiGLU, bitwise;
+# shared_fold_quant: it also writes down_proj's MXFP8 input, bitwise;
+# shared_fold_early_release: that GEMM releases down_proj's GEMM at its loads, as
+# FlashInfer's own gate_up does, not after its stores)
 OPT_IN_SLOTS = (
     "draft_embed",
     "hop_b_cap16",
@@ -122,6 +126,9 @@ OPT_IN_SLOTS = (
     "attn_indexer_fused",
     "target_lm_head_mxfp8",
     "draft_lm_head_mxfp8",
+    "shared_fold",
+    "shared_fold_quant",
+    "shared_fold_early_release",
 )
 # Hardware covered only when listed in the same variable (sm148: the 148 SMs of a B300,
 # the target spec's resident blocks)
@@ -163,6 +170,9 @@ def slot_reasons() -> list[str]:
     for slot, needs in (
         ("gate", "moe"),
         ("shared_ll", "moe"),
+        ("shared_fold", "shared_ll"),
+        ("shared_fold_quant", "shared_fold"),
+        ("shared_fold_early_release", "shared_fold_quant"),
         ("gate_wide", "gate"),
         ("hop_a_batch2", "hop_a"),
         ("attn_qkv_a", "attn"),
