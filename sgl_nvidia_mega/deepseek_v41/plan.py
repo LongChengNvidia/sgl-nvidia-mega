@@ -45,6 +45,8 @@ class Slots(msgspec.Struct, frozen=True):
     embed: bool = False  # the embedding looks up this rank's whole table
     engram_prefetch: bool = False  # Engram lookups + WKVs run on the prefetch stream
     two_shot: bool = False  # both posts run the two-shot all-reduce + mHC
+    # the Engram hashes forked at the step start, the embedding written into the streams
+    prologue_fork: bool = False
 
 
 class Facts(msgspec.Struct, frozen=True):
@@ -58,6 +60,7 @@ class Facts(msgspec.Struct, frozen=True):
     engram_prefetch: bool = False  # every Engram layer prefetches, checked at build
     two_shot: bool = False  # the two-shot mailbox and kernels built
     fast_gate_wide: bool = False  # slot gate_wide: the fast top-k at every routed width
+    prologue_fork: bool = False  # slot prologue_fork
 
 
 def max_rows(two_shot: bool) -> int:
@@ -124,6 +127,7 @@ def slots(rows: int, facts: Facts) -> Slots:
         embed=facts.embed,
         engram_prefetch=facts.engram_prefetch and rows <= ENGRAM_PREFETCH_MAX_ROWS,
         two_shot=facts.two_shot and rows >= TWO_SHOT_MIN_ROWS,
+        prologue_fork=facts.prologue_fork,
     )
 
 

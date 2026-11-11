@@ -113,7 +113,10 @@ DRAFT_SLOTS = frozenset(
 # shared_fold: slot shared_ll's gate_up epilogue writes the clamped SwiGLU, bitwise;
 # shared_fold_quant: it also writes down_proj's MXFP8 input, bitwise;
 # shared_fold_early_release: that GEMM releases down_proj's GEMM at its loads, as
-# FlashInfer's own gate_up does, not after its stores)
+# FlashInfer's own gate_up does, not after its stores;
+# prologue_fork: the Engram hashes forked at the step start and the embedding written
+# into the streams, bitwise; hc_coeff_fused: the prenorm's mHC coefficients in one
+# launch, bitwise with hc_prenorm's two)
 OPT_IN_SLOTS = (
     "draft_embed",
     "hop_b_cap16",
@@ -129,6 +132,8 @@ OPT_IN_SLOTS = (
     "shared_fold",
     "shared_fold_quant",
     "shared_fold_early_release",
+    "prologue_fork",
+    "hc_coeff_fused",
 )
 # Hardware covered only when listed in the same variable (sm148: the 148 SMs of a B300,
 # the target spec's resident blocks)
@@ -209,6 +214,7 @@ def slot_reasons() -> list[str]:
         ("draft_prenorm", "draft"),
         ("draft_qkv_a_ll", "draft_qkv_a"),
         ("draft_wo_b_ll", "draft_wo_a"),
+        ("hc_coeff_fused", "hc_prenorm"),
     ):
         if slot in SLOTS and needs not in SLOTS:
             reasons.append(f"{SLOTS_ENV}: slot {slot!r} needs slot {needs!r}")
@@ -318,6 +324,7 @@ def build(model, ctx):
 
     from sgl_nvidia_mega.deepseek_v41 import plan as slot_plan
     from sgl_nvidia_mega.deepseek_v41.attention.chain import SWAPAB_MAX_ROWS
+    from sgl_nvidia_mega.deepseek_v41.boundary import prenorm
     from sgl_nvidia_mega.deepseek_v41.runtime import embedding
     from sgl_nvidia_mega.deepseek_v41.runtime.executor import (
         PACKAGES,
@@ -356,6 +363,7 @@ def build(model, ctx):
         engram_prefetch=engram.prefetch is not None,
         two_shot=getattr(bound["boundary"], "two_shot", None) is not None,
         fast_gate_wide="gate_wide" in SLOTS,
+        prologue_fork="prologue_fork" in SLOTS,
     )
     slots = {
         w: msgspec.structs.replace(s, hop_a=s.hop_a and w in hop.rows)
@@ -372,6 +380,7 @@ def build(model, ctx):
             for step in bound["attention"].values()
         ),
         "hc_prenorm": bound["boundary"].prenorm,
+        "hc_coeff_fused": bound["boundary"].prenorm and bool(prenorm.fused()),
         "early_trigger": "early_trigger" in SLOTS and facts.hop_a,
         "hop_a_batch2": any(
             s.hop_a and w > slot_plan.HOP_A_BATCH1_ROWS for w, s in slots.items()
@@ -400,6 +409,7 @@ def build(model, ctx):
             s.fast_gate and w not in slot_plan.FAST_GATE_ROWS for w, s in slots.items()
         ),
         "req_pos_once": "req_pos_once" in SLOTS,
+        "prologue_fork": "prologue_fork" in SLOTS,
         "attn_indexer": any(
             a.chain is not None and a.chain[0].indexer is not None
             for a in bound["attention"].values()
