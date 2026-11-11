@@ -55,6 +55,9 @@ SHIPPED_SLOTS = (
     "draft_gate",
     "draft_tail",
     "draft_post",
+    # draft_hop: at attention TP8 with MoE TP4 x EP2, where SGLang has no fused post,
+    # draft_post's posts on the plugin's Lamport all-reduce + mHC (no effect at TP4)
+    "draft_hop",
     "draft_seam",
     "draft_attn",
     "draft_qfront",
@@ -83,6 +86,7 @@ DRAFT_SLOTS = frozenset(
         "draft_gate",
         "draft_tail",
         "draft_post",
+        "draft_hop",
         "draft_seam",
         "draft_attn",
         "draft_qfront",
@@ -116,7 +120,11 @@ DRAFT_SLOTS = frozenset(
 # FlashInfer's own gate_up does, not after its stores;
 # prologue_fork: the Engram hashes forked at the step start and the embedding written
 # into the streams, bitwise; hc_coeff_fused: the prenorm's mHC coefficients in one
-# launch, bitwise with hc_prenorm's two)
+# launch, bitwise with hc_prenorm's two;
+# swapab_h8 / wo_a_g1: at attention TP8, swap-AB on the 8 local heads and the fused wo_a
+# on the 1 local group, target and draft, in place of SGLang's FlashMLA and einsum, which
+# TP8 runs (each bitwise to its TP4 kernel on the same heads / group, not to SGLang's
+# TP8 arm); no effect at TP4)
 OPT_IN_SLOTS = (
     "draft_embed",
     "hop_b_cap16",
@@ -134,6 +142,8 @@ OPT_IN_SLOTS = (
     "shared_fold_early_release",
     "prologue_fork",
     "hc_coeff_fused",
+    "swapab_h8",
+    "wo_a_g1",
 )
 # Hardware covered only when listed in the same variable (sm148: the 148 SMs of a B300,
 # the target spec's resident blocks)
@@ -204,6 +214,7 @@ def slot_reasons() -> list[str]:
         ("draft_tail", "draft"),
         ("draft_post", "draft"),
         ("draft_seam", "draft_post"),
+        ("draft_hop", "draft_post"),
         ("draft_attn", "draft"),
         ("draft_qfront", "draft_attn"),
         ("draft_wo_a", "draft_attn"),
@@ -215,6 +226,8 @@ def slot_reasons() -> list[str]:
         ("draft_qkv_a_ll", "draft_qkv_a"),
         ("draft_wo_b_ll", "draft_wo_a"),
         ("hc_coeff_fused", "hc_prenorm"),
+        ("swapab_h8", "attn"),
+        ("wo_a_g1", "attn"),
     ):
         if slot in SLOTS and needs not in SLOTS:
             reasons.append(f"{SLOTS_ENV}: slot {slot!r} needs slot {needs!r}")
@@ -431,8 +444,16 @@ def build(model, ctx):
             for a in bound["attention"].values()
         ),
     }
+    # kv_before_wait only moves swap-AB's KV gather: with no low-ratio layer on
+    # swap-AB (attention TP8 without slot swapab_h8) it has nothing to serve, which is
+    # not a failed build; it is left off the active slots
+    moot = (
+        set()
+        if any(a.swapab and a.low_ratio for a in bound["attention"].values())
+        else {"kv_before_wait"}
+    )
     # every package's build agrees across ranks, so this raises on every rank alike
-    missing = sorted(name for name in SLOTS & built.keys() if not built[name])
+    missing = sorted(name for name in (SLOTS & built.keys()) - moot if not built[name])
     if missing:
         raise RuntimeError(
             f"NVIDIA megakernel: requested slots {missing} built at no width "
