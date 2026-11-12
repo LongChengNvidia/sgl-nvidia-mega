@@ -96,9 +96,11 @@ SGLANG_READS = {
         "num_added_elements",
     ),
     "srt/layers/logits_processor.py": ("LogitsProcessorOutput", "hidden_states"),
+    "srt/model_executor/forward_mode.py|srt/model_executor/forward_batch_info.py": (
+        "is_target_verify",
+    ),
     "srt/model_executor/forward_batch_info.py": (
         "forward_mode",
-        "is_target_verify",
         "batch_size",
         "positions",
         "out_cache_loc",
@@ -243,6 +245,12 @@ class DraftStep:
     widths = (DRAFT_ROWS,)
     # SGLang's proposal samples the block (BuiltMegakernel)
     draft_sampler = None
+    # no EAGLE entries, graph variants or speculative runtime hooks (BuiltMegakernel)
+    draft_loop = None
+    draft_extend = None
+    begin_draft_round = None
+    graph_variants = None
+    speculative_runtime_hooks = None
 
     def __init__(self, model, hf_config, ctx):
         from sglang.srt.runtime_context import get_parallel

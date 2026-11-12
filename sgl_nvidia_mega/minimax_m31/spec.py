@@ -75,7 +75,7 @@ SGLANG_READS = {
 }
 
 # the SGLang megakernel contract this spec is written against
-API_VERSION = 1
+API_VERSION = 2
 # MXFP8 GEMM backends that keep each linear's checkpoint-layout weight (flashinfer_trtllm
 # shuffles it in place)
 MXFP8_GEMM_BACKENDS = frozenset(
