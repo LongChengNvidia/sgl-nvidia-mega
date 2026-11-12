@@ -156,11 +156,19 @@ class AttentionStep:
         qkv_a_bf16: bool = False,
         index_q_mxfp8_in: bool = False,
         kv_before_wait: bool = False,
+        swapab_h8: bool = False,
+        wo_a_g1: bool = False,
     ):
         self.attn = attn
         # swap-AB gathers the KV before its PDL wait on the low-ratio prepare (slot
         # "kv_before_wait")
         self.kv_before_wait = chain_ops and kv_before_wait
+        # a layer that writes its sparse range in the step (its indexer's selection, its
+        # compressor's rows): with kv_before_wait, swap-AB reads that range after its
+        # PDL wait
+        self.index_after_wait = self.kv_before_wait and (
+            attn.indexer is not None or attn.compressor is not None
+        )
         self.low_ratio = attn.compress_ratio in (1, 2)
         # the attention chain's query ops, padded / roped query and unroped 16 heads
         self.chain = None
@@ -175,7 +183,10 @@ class AttentionStep:
                 )
                 for rope in (False, True)
             )
-        self.swapab = chain_ops and chain.swapab_applies(attn)
+        # slot swapab_h8: swap-AB on attention TP8's 8 local heads
+        self.swapab = chain_ops and chain.swapab_applies(attn, heads8=swapab_h8)
+        # slot wo_a_g1: the fused wo_a on attention TP8's 1 local group
+        self.fused_wo_a = chain_ops and chain.fused_wo_a_applies(attn, wo_a_g1)
         # fp32 [positions, 64]: cos, sin interleaved, as the swap-AB query RoPE reads them
         self.freqs = (
             torch.view_as_real(attn.freqs_cis).flatten(-2).contiguous()
@@ -251,6 +262,7 @@ class AttentionStep:
         """The layer's TP-partial attention output (``mhc.AttnOutput``) for input
         ``x`` (``x_quant``: the same input as MXFP8); ``publish``: see ``ops.wo_b``."""
         attn = self.attn
+        fused = self.fused_wo_a
         assert not view.kv_pool.uniform_fp8, "the uniform-FP8 pool"
         rows = x.shape[0]
         use_chain = self.chain is not None and rows <= chain.NORM_QUANT_MAX_ROWS
@@ -260,15 +272,27 @@ class AttentionStep:
             if swapab:
                 # the attention ropes the 16-head query; no 64-head pad
                 q = path(attn, x, positions, fb, view, None, x_quant, self.chain[1])
-                # the low-ratio prepare joins its KV / index streams (full graph edges)
-                # before the query, so the attention may gather the KV before its wait
+                # the low-ratio prepare joins its KV / index streams before the query,
+                # so the attention may gather the KV before its wait. Under capture
+                # those joins are programmatic edges, not full ones: SGLang's top-k
+                # releases its dependents before it writes the selection, so the
+                # attention reads the layer's own sparse range after its wait
                 early = self.kv_before_wait and path is prepare.low_ratio
+                after_wait = early and self.index_after_wait
                 o = chain.sparse_decode(
-                    attn, view, q, positions, self.freqs, kv_before_wait=early
+                    attn,
+                    view,
+                    q,
+                    positions,
+                    self.freqs,
+                    kv_before_wait=early,
+                    extra_after_wait=after_wait,
                 )
                 tiles = _publish_row_tiles(rows, publish)
                 return ops.wo_b(
-                    attn, chain.wo_a(attn, o, positions, fb, tiles), publish
+                    attn,
+                    chain.wo_a(attn, o, positions, fb, tiles, fused=fused),
+                    publish,
                 )
             heads, q_padded, q_out, tp_slice = self._query_buffer(x, view)
             attn_sink = attn._local_attn_sink(heads)
@@ -288,7 +312,9 @@ class AttentionStep:
             if use_chain:
                 tiles = _publish_row_tiles(rows, publish)
                 return ops.wo_b(
-                    attn, chain.wo_a(attn, o, positions, fb, tiles), publish
+                    attn,
+                    chain.wo_a(attn, o, positions, fb, tiles, fused=fused),
+                    publish,
                 )
             return ops.wo_b(attn, ops.wo_a(attn, o, positions, fb), publish)
 

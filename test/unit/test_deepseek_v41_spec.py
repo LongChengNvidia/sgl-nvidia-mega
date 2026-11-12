@@ -14,10 +14,12 @@ from sglang.srt.environ import envs
 
 try:
     from sglang.kernels.plugin_kernels.nvidia import spec as registry
+    from sglang.kernels.plugin_kernels.nvidia.spec import Feature
     from sglang.srt.kernel_plugins.nvidia import binding as guards
 except ModuleNotFoundError:  # SGLang before sgl-project/sglang#45389
     from sglang.srt.megakernels import guards
     from sglang.srt.megakernels import spec as registry
+    from sglang.srt.megakernels.spec import Feature
 
 from sglang.srt.model_executor.cuda_graph_config import (
     Backend,
@@ -84,6 +86,34 @@ def test_the_documented_setup_is_accepted():
     assert _refusal() == ""
 
 
+@pytest.mark.parametrize(
+    "digest",
+    [
+        "118744bf9553da5fcbf6504739d499ec208dcf2034d473799ec11661e1313280",
+        "c9d16930cc99c98d2de57e10882f52611a784268ba497b2b10d613a935a5596c",
+    ],
+    ids=["flashinfer-0.7.0-0.7.2", "flashinfer-0.7.3"],
+)
+def test_known_flashinfer_gemm_sources_are_accepted(digest):
+    with (
+        patch.object(spec, "flashinfer_ll_gemm_digest", return_value=digest),
+        patch.object(spec.importlib.util, "find_spec", return_value=object()),
+    ):
+        assert spec.toolchain_reasons() == []
+
+
+@pytest.mark.parametrize("digest", ["0" * 64, "missing"])
+def test_unknown_or_missing_flashinfer_gemm_source_is_refused(digest):
+    with (
+        patch.object(spec, "flashinfer_ll_gemm_digest", return_value=digest),
+        patch.object(spec.importlib.util, "find_spec", return_value=object()),
+    ):
+        reasons = spec.toolchain_reasons()
+    assert len(reasons) == 1
+    assert spec.FLASHINFER_LL_GEMM in reasons[0]
+    assert digest[:12] in reasons[0]
+
+
 BREAKABLE = with_phase(
     default_cuda_graph_config(), Phase.DECODE, backend=Backend.BREAKABLE
 )
@@ -92,7 +122,8 @@ BREAKABLE = with_phase(
 @pytest.mark.parametrize(
     "kw, want",
     [
-        (dict(tp_size=8), "tp_size 8"),
+        (dict(tp_size=8), "tp_size 8 with ep_size 1"),
+        (dict(tp_size=2), "tp_size 2"),
         (dict(kv_cache_dtype="auto"), "kv_cache_dtype 'auto'"),
         (dict(speculative_algorithm="EAGLE"), "speculative_algorithm 'EAGLE'"),
         (dict(cuda_graph_config=BREAKABLE), "decode CUDA graphs"),
@@ -101,6 +132,53 @@ BREAKABLE = with_phase(
 )
 def test_each_refusal_names_its_reason(kw, want):
     assert want in _refusal(**kw)
+
+
+# attention TP8 + MoE TP4 x EP2 over two GB300 trays
+TP8_EP2 = dict(
+    tp_size=8, ep_size=2, nnodes=2, node_rank=0, dist_init_addr="127.0.0.1:5000"
+)
+
+
+def test_tp8_with_ep2_over_two_trays_is_accepted():
+    assert _refusal(**TP8_EP2) == ""
+    assert {Feature.MULTI_NODE_TP, Feature.EXPERT_PARALLEL} <= spec.SPEC.features
+
+
+@pytest.mark.parametrize(
+    "kw, want",
+    [
+        (dict(TP8_EP2, ep_size=1), "tp_size 8 with ep_size 1"),
+        (dict(TP8_EP2, ep_size=4), "tp_size 8 with ep_size 4"),
+        (dict(TP8_EP2, ep_size=8), "tp_size 8 with ep_size 8"),
+        (dict(ep_size=2), "tp_size 4 with ep_size 2"),
+        (dict(ep_size=4), "tp_size 4 with ep_size 4"),
+        (
+            dict(nnodes=2, node_rank=0, dist_init_addr="127.0.0.1:5000"),
+            "TP4 serves one tray",
+        ),
+        (dict(TP8_EP2, enable_eplb=True), "EPLB"),
+    ],
+)
+def test_every_other_topology_is_refused_with_its_reason(kw, want):
+    assert want in _refusal(**kw)
+
+
+def test_a_replicated_shared_expert_is_refused():
+    """The plugin follows SGLang's default shared expert, split over the TP group; the
+    replicated one (SGLANG_SHARED_EXPERT_TP1) would change what the posts sum."""
+    message = _refusal(env={"SGLANG_SHARED_EXPERT_TP1": True}, **TP8_EP2)
+    assert "SGLANG_SHARED_EXPERT_TP1" in message, message
+
+
+def test_the_topology_table_is_tp4_and_tp8_ep2():
+    assert spec.TOPOLOGIES == {(4, 1), (8, 2)}
+    assert spec.REQUIREMENTS.tp_sizes == {4, 8}
+    for tp, ep in [(4, 1), (8, 2)]:
+        cfg = SimpleNamespace(tp_size=tp, ep_size=ep, nnodes=tp // 4, moe_dp_size=1)
+        assert spec.topology_reasons(cfg) == []
+    cfg = SimpleNamespace(tp_size=8, ep_size=2, nnodes=2, moe_dp_size=2)
+    assert spec.topology_reasons(cfg) == ["moe_dp_size 2 is not 1"]
 
 
 DISABLED = with_phase(
@@ -164,3 +242,19 @@ def test_the_draft_spec_follows_the_target_spec():
         assert getattr(draft.SPEC.requires, field) == getattr(spec.SPEC.requires, field)
     # the draft forward's widest step with slot "draft", else SGLang's forward
     assert draft.SPEC.max_rows == (48 if "draft" in runtime.SLOTS else 0)
+
+
+def test_sm148_lowers_the_targets_sm_floor_by_name(monkeypatch):
+    """The target needs GB300's 152 SMs, or a B300's 148 with "sm148" listed, a name
+    the slot check knows; the draft needs none."""
+    from sgl_nvidia_mega.deepseek_v41 import draft, runtime
+
+    monkeypatch.setattr(spec, "SLOTS", frozenset())
+    assert spec.resident_blocks() == 152
+    monkeypatch.setattr(spec, "SLOTS", frozenset({"sm148"}))
+    assert spec.resident_blocks() == 148
+    assert draft.SPEC.requires.resident_blocks == 0
+    monkeypatch.setattr(runtime, "SLOTS", frozenset({"sm148"}))
+    assert _refusal() == ""
+    monkeypatch.setattr(runtime, "SLOTS", frozenset({"sm184"}))
+    assert "unknown slot 'sm184'" in _refusal()

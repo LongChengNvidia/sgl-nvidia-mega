@@ -38,7 +38,7 @@ except ModuleNotFoundError:  # SGLang before sgl-project/sglang#45389
     from sglang.srt.megakernels.spec import Step
 
 from sgl_nvidia_mega.deepseek_v41 import attention, boundary, engram, logits, moe
-from sgl_nvidia_mega.deepseek_v41.runtime import SLOTS, embedding
+from sgl_nvidia_mega.deepseek_v41.runtime import SLOTS, embedding, prologue
 from sgl_nvidia_mega.deepseek_v41.runtime.state import StepState
 
 logger = logging.getLogger(__name__)
@@ -113,6 +113,7 @@ class MegakernelDecode:
     draft_extend = None
     begin_draft_round = None
     graph_variants = None
+    speculative_runtime_hooks = None
 
     def __init__(
         self,
@@ -195,17 +196,26 @@ class MegakernelDecode:
 
         m = st.model
         try:
+            if st.slots.prologue_fork:
+                # the hashes (and the Engram prefetch) read only the step's inputs
+                engram.fork(st)
             attention.head(st)
-            x = embedding.embed(st) if input_embeds is None else input_embeds
-            x = hc_broadcast(x, m.hc_mult)
+            if st.slots.prologue_fork:
+                x = prologue.streams(st, input_embeds)
+            else:
+                x = embedding.embed(st) if input_embeds is None else input_embeds
+                x = hc_broadcast(x, m.hc_mult)
             st.aux = [] if m.dspark_layers_to_capture is not None else None
             # the compressor caches each step's rotary tables on the batch
             for attr in ("freqs_cis_c4", "freqs_cis_c128"):
                 if hasattr(st.fb, attr):
                     delattr(st.fb, attr)
             residual, pre = self._layers(st, x)
+            collapsed = boundary.final_collapse(st)
         finally:
             boundary.clear(st)
+        if collapsed is not None:
+            return boundary.head(st, residual, collapsed)
         return logits.head(st, residual, pre)
 
     def _layers(self, st, x):

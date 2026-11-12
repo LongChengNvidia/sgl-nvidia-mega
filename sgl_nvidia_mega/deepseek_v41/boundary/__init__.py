@@ -24,7 +24,13 @@ from sgl_nvidia_mega.deepseek_v41.boundary.boundaries import Boundaries, Boundar
 
 # The SGLang names this module reads (test/unit/test_contract.py pins them)
 SGLANG_READS = {
-    "srt/models/deepseek_v4.py": ("layers", "start_layer", "end_layer"),
+    "srt/models/deepseek_v4.py": (
+        "layers",
+        "start_layer",
+        "end_layer",
+        "attn_hc",
+        "ffn_hc",
+    ),
     "srt/models/deepseek_v4_mhc.py": ("materialized", "residual", "pre"),
     "srt/runtime_context.py": (
         "get_forward",
@@ -65,12 +71,16 @@ def build(model, ctx, group) -> Boundaries:
             hop_b_wide="hop_b_wide" in runtime.SLOTS,
             hop_b_cap16="hop_b_cap16" in runtime.SLOTS,
             hop_b_quad_trigger="hop_b_quad_trigger" in runtime.SLOTS,
+            mbarrier_exchange="hop_mbar" in runtime.SLOTS,
+            final_collapse="hop_final_collapse" in runtime.SLOTS,
         )
     two_shot, two_shot_reason = None, "stock (slot off)"
     if "two_shot" in runtime.SLOTS:
         two_shot, two_shot_reason = _build_two_shot(model, ctx, group)
     # a load-time fact of the platform and config, the same on every rank
     use_prenorm = "hc_prenorm" in runtime.SLOTS and not prenorm.reason()
+    if use_prenorm and "hc_coeff_fused" in runtime.SLOTS:
+        _build_hc_coeff(model, group)
     return Boundaries(
         [m.layers[i] for i in range(m.start_layer, m.end_layer)],
         hop_a=hop,
@@ -79,7 +89,21 @@ def build(model, ctx, group) -> Boundaries:
         two_shot_reason=two_shot_reason,
         hop_b="hop_b" in runtime.SLOTS,
         prenorm=use_prenorm,
+        final_collapse="hop_final_collapse" in runtime.SLOTS,
     )
+
+
+def _build_hc_coeff(model, group) -> None:
+    """Slot hc_coeff_fused: the one-launch coefficients, checked bit for bit against
+    the prenorm pair on every sublayer's weights; raises on every rank alike."""
+    from sgl_nvidia_mega.deepseek_v41.boundary import prenorm
+
+    m = model.model
+    layers = [m.layers[i] for i in range(m.start_layer, m.end_layer)]
+    subs = [hc for layer in layers for hc in (layer.attn_hc, layer.ffn_hc)]
+    device = layers[0].self_attn.wo_b.weight.device
+    if why := prenorm.build_fused(subs, device, group):
+        raise RuntimeError(f"NVIDIA megakernel: slot hc_coeff_fused: {why}")
 
 
 def _build_two_shot(model, ctx, group):
@@ -176,6 +200,18 @@ def final(st):
     st.bound["boundary"].join_aux(bs)
     state = bs.hc.materialized(m.layers[m.end_layer - 1].hc_cfg)
     return state.residual, state.pre
+
+
+def final_collapse(st):
+    """The head's mHC collapse the last layer's hop B wrote (slot hop_final_collapse),
+    or None: the head then combines the final streams itself."""
+    return _state(st).final_collapse
+
+
+def head(st, residual, collapsed):
+    """``logits.head`` on the collapse hop B wrote: (hidden, pre_hc_head), SGLang's
+    final RMSNorm on the same BF16 rows its mhc_combine would give."""
+    return st.model.norm(collapsed), residual.flatten(1)
 
 
 def clear(st) -> None:
